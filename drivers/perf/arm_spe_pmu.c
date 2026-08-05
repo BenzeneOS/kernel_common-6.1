@@ -1110,6 +1110,14 @@ static int arm_spe_pmu_cpu_startup(unsigned int cpu, struct hlist_node *node)
 	if (!cpumask_test_cpu(cpu, &spe_pmu->supported_cpus))
 		return 0;
 
+	/* The PPI partition can name cores without SPE, and touching the
+	   profiling registers on one of those is an undefined instruction. */
+	if (!cpuid_feature_extract_unsigned_field(read_cpuid(ID_AA64DFR0_EL1),
+						  ID_AA64DFR0_EL1_PMSVer_SHIFT)) {
+		cpumask_clear_cpu(cpu, &spe_pmu->supported_cpus);
+		return 0;
+	}
+
 	__arm_spe_pmu_setup_one(spe_pmu);
 	return 0;
 }
@@ -1129,11 +1137,17 @@ static int arm_spe_pmu_cpu_teardown(unsigned int cpu, struct hlist_node *node)
 static int arm_spe_pmu_dev_init(struct arm_spe_pmu *spe_pmu)
 {
 	int ret;
+	unsigned int cpu;
 	cpumask_t *mask = &spe_pmu->supported_cpus;
 
-	/* Make sure we probe the hardware on a relevant CPU */
-	ret = smp_call_function_any(mask,  __arm_spe_pmu_dev_probe, spe_pmu, 1);
-	if (ret || !(spe_pmu->features & SPE_PMU_FEAT_DEV_PROBED))
+	/* Try each cpu, since the partition can name cores without SPE. */
+	for_each_cpu(cpu, mask) {
+		ret = smp_call_function_single(cpu, __arm_spe_pmu_dev_probe,
+					       spe_pmu, 1);
+		if (!ret && (spe_pmu->features & SPE_PMU_FEAT_DEV_PROBED))
+			break;
+	}
+	if (!(spe_pmu->features & SPE_PMU_FEAT_DEV_PROBED))
 		return -ENXIO;
 
 	/* Request our PPIs (note that the IRQ is still disabled) */
